@@ -1,18 +1,33 @@
 ## Supported transports: nethernet, raknet.
-transport: nethernet
 ## Address on which the proxy accepts client connections.
 proxy:
   host: 0.0.0.0
   port: 19122
+  transport: nethernet
 ## Destination server which the client will connect to.
 destination:
   host: 127.0.0.1
   port: 19132
+  transport: nethernet
   signaling-scheme: auto
+  ## Resolve the destination through Xbox Live instead. Requires online mode.
+  ## Realms, friends and NetherNet IDs always connect over NetherNet.
+  # experience-id: ""
+  # featured-server-title: ""
+  # realm-name: ""
+  # friend-name: ""
+  # nethernet-id: ""
 ## Keep the identity key private. Disabling authentication allows unverified clients.
 nethernet:
   identity-file: nethernet/identity.pem
   verify-client-authentication: true
+## Run the proxy in online mode. This will require login with a Microsoft account on start.
+online-mode: true
+## Save credentials when in online mode for future logins.
+save-auth-details: true
+## Broadcast the ProxyPass session over Xbox Live (should generally not be enabled, as it would allow any friend to join as you)
+## Only used with the nethernet proxy transport.
+broadcast-session: false
 ## Maximum of clients which can connect to ProxyPass. If this should be disabled, set it to 0.
 max-clients: 0
 ## Encode and decode packets to test protocol library for bugs
@@ -22,7 +37,16 @@ log-packets: true
 ## Where to log packet data
 ## Valid options: console, file or both
 log-to: file
+## Enables the UI
+enable-ui: false
+## If ProxyPass should follow transfer packets.
+follow-transfers: true
+## If ProxyPass should download packs from the destination server.
+## This will only download packs if the client has not downloaded them yet.
+download-packs: true
 
+## Inverts the list below
+invert-ignored-list: false
 ## Packets to ignore to make your log more refined. These default packet are generally spammed
 ignored-packets:
   - "NetworkStackLatencyPacket"
@@ -32,3 +56,8 @@ ignored-packets:
   - "NetworkChunkPublisherUpdatePacket"
   - "ClientCacheBlobStatusPacket"
   - "ClientCacheMissResponsePacket"
+## Should ProxyPass lie and say the client already has all the packs, even if it doesn't
+ignore-resource-packs: false
+
+## Packets to block going to and from the client.
+blocks-packets: []

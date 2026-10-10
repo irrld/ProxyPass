@@ -2,22 +2,25 @@ package org.cloudburstmc.proxypass.network.bedrock.session;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.log4j.Log4j2;
+import net.raphimc.minecraftauth.bedrock.model.MinecraftMultiplayerToken;
 import org.cloudburstmc.netty.util.nethernet.TransportIdentityBinding;
 import org.cloudburstmc.protocol.bedrock.data.EncodingSettings;
 import org.cloudburstmc.protocol.bedrock.data.PacketCompressionAlgorithm;
+import org.cloudburstmc.protocol.bedrock.data.auth.AuthPayload;
 import org.cloudburstmc.protocol.bedrock.data.auth.AuthType;
 import org.cloudburstmc.protocol.bedrock.data.auth.TokenPayload;
 import org.cloudburstmc.protocol.bedrock.data.definitions.ItemDefinition;
 import org.cloudburstmc.protocol.bedrock.packet.*;
 import org.cloudburstmc.protocol.bedrock.util.ChainValidationResult;
 import org.cloudburstmc.protocol.bedrock.util.ChainValidationResult.IdentityClaims;
+import org.cloudburstmc.protocol.bedrock.util.ChainValidationResult.IdentityData;
 import org.cloudburstmc.protocol.bedrock.util.EncryptionUtils;
 import org.cloudburstmc.protocol.common.DefinitionRegistry;
 import org.cloudburstmc.protocol.common.PacketSignal;
 import org.cloudburstmc.proxypass.ProxyPass;
 import org.cloudburstmc.proxypass.network.Transport;
+import org.cloudburstmc.proxypass.network.bedrock.util.FakeDefinitionRegistry;
 import org.cloudburstmc.proxypass.network.bedrock.util.ForgeryUtils;
-import org.cloudburstmc.proxypass.network.bedrock.util.ItemDefinitionRegistries;
 import org.cloudburstmc.proxypass.network.bedrock.util.SkinUtils;
 import org.jose4j.json.JsonUtil;
 import org.jose4j.json.internal.json_simple.JSONObject;
@@ -35,6 +38,7 @@ public class UpstreamPacketHandler implements BedrockPacketHandler {
 
     private final ProxyServerSession session;
     private final ProxyPass proxy;
+    private final Account account;
     private JSONObject skinData;
     private ChainValidationResult chain;
     private String clientJwt;
@@ -109,7 +113,7 @@ public class UpstreamPacketHandler implements BedrockPacketHandler {
                 throw new JoseException("Login identity does not match the transport identity");
             }
 
-            if (this.proxy.getConfiguration().getTransport() == Transport.NETHERNET && this.proxy.getConfiguration().getNethernet().isVerifyClientAuthentication() && !chain.signed()) {
+            if (this.proxy.getConfiguration().getProxy().getTransport() == Transport.NETHERNET && this.proxy.getConfiguration().getNethernet().isVerifyClientAuthentication() && !chain.signed()) {
                 throw new JoseException("An authenticated client login is required");
             }
 
@@ -117,7 +121,11 @@ public class UpstreamPacketHandler implements BedrockPacketHandler {
             jws.setCompactSerialization(clientJwt);
 
             skinData = new JSONObject(JsonUtil.parseJson(jws.getUnverifiedPayload()));
-            if (!this.proxy.getConfiguration().getTransport().supportsPacketEncryption()) {
+            if (skinData.get("ServerAddress") != null) {
+                this.session.setConnectedViaAddress(skinData.get("ServerAddress").toString());
+            }
+
+            if (!this.proxy.getConfiguration().getProxy().getTransport().supportsPacketEncryption()) {
                 this.initializeProxySession();
             } else {
                 KeyPair handshakeKey = EncryptionUtils.createKeyPair();
@@ -149,10 +157,50 @@ public class UpstreamPacketHandler implements BedrockPacketHandler {
         return PacketSignal.HANDLED;
     }
 
+    @Override
+    public PacketSignal handle(ResourcePackClientResponsePacket packet) {
+        if (this.proxy.getConfiguration().isDownloadPacks() && packet.getStatus() == ResourcePackClientResponsePacket.Status.COMPLETED) {
+            this.player.getPackDownloader().processPacks();
+        }
+        return PacketSignal.UNHANDLED;
+    }
+
     private void initializeProxySession() {
         log.debug("Initializing proxy session");
-        KeyPair keyPair = EncryptionUtils.createKeyPair();
-        this.proxy.newClient(keyPair, this.chain.identityClaims().extraData, downstream -> {
+        if (this.account == null) {
+            this.connectDownstream();
+            return;
+        }
+
+        // Tokens expire while the proxy runs
+        this.account.refreshLoginTokens().whenCompleteAsync((ignored, failure) -> {
+            if (failure != null) {
+                log.error("Unable to refresh the proxy account tokens", failure);
+                this.session.disconnect("Unable to refresh the proxy account");
+            } else if (this.session.isConnected()) {
+                this.connectDownstream();
+            }
+        }, this.session.getPeer().getChannel().eventLoop());
+    }
+
+    private void connectDownstream() {
+        IdentityData identity = this.chain.identityClaims().extraData;
+        KeyPair keyPair;
+        String xuid;
+        String displayName;
+        if (this.account == null) {
+            keyPair = EncryptionUtils.createKeyPair();
+            xuid = identity.xuid;
+            displayName = identity.displayName;
+        } else {
+            // The server sees the proxy account instead of the client
+            MinecraftMultiplayerToken token = this.account.authManager().getMinecraftMultiplayerToken().getCached();
+            keyPair = this.account.authManager().getSessionKeyPair();
+            xuid = token.getXuid();
+            displayName = token.getDisplayName();
+        }
+
+        this.proxy.newClient(keyPair, xuid, displayName, downstream -> {
             if (!this.session.isConnected()) {
                 downstream.getPeer().getChannel().close();
                 return;
@@ -164,7 +212,7 @@ public class UpstreamPacketHandler implements BedrockPacketHandler {
             this.session.setSendSession(downstream);
             this.seedDefinitionRegistries(downstream);
 
-            ProxyPlayerSession proxySession = new ProxyPlayerSession(this.session, downstream, this.proxy, this.chain.identityClaims().extraData, keyPair);
+            ProxyPlayerSession proxySession = new ProxyPlayerSession(this.session, downstream, this.proxy, identity, keyPair);
             this.player = proxySession;
 
             downstream.setPlayer(proxySession);
@@ -180,12 +228,11 @@ public class UpstreamPacketHandler implements BedrockPacketHandler {
                 log.error("JSON output error: {}", e.getMessage(), e);
             }
 
-            String authToken = ForgeryUtils.forgeToken(proxySession.getProxyKeyPair(), this.chain.identityClaims().extraData);
-            String skinData = ForgeryUtils.forgeSkinData(proxySession.getProxyKeyPair(), this.skinData);
-
             LoginPacket login = new LoginPacket();
-            login.setAuthPayload(new TokenPayload(authToken, AuthType.SELF_SIGNED));
-            login.setClientJwt(skinData);
+            login.setAuthPayload(this.forgeAuthPayload(proxySession));
+            login.setClientJwt(this.account == null
+                    ? ForgeryUtils.forgeSkinData(proxySession.getProxyKeyPair(), this.skinData)
+                    : ForgeryUtils.forgeOnlineSkinData(this.account, this.skinData, this.proxy.getTargetAddress()));
             login.setProtocolVersion(ProxyPass.PROTOCOL_VERSION);
 
             downstream.setPacketHandler(new DownstreamLoginPacketHandler(downstream, proxySession, this.proxy, login));
@@ -194,7 +241,7 @@ public class UpstreamPacketHandler implements BedrockPacketHandler {
             RequestNetworkSettingsPacket packet = new RequestNetworkSettingsPacket();
             packet.setProtocolVersion(ProxyPass.PROTOCOL_VERSION);
             downstream.sendPacketImmediately(packet);
-
+            proxySession.getLogger().logPacket(this.session, packet, true);
         }).whenComplete((downstream, failure) -> {
             if (failure != null) {
                 log.warn("Unable to connect to backend {}", this.proxy.getTargetAddress(), failure);
@@ -207,6 +254,19 @@ public class UpstreamPacketHandler implements BedrockPacketHandler {
         });
     }
 
+    private AuthPayload forgeAuthPayload(ProxyPlayerSession proxySession) {
+        if (this.account == null) {
+            String token = ForgeryUtils.forgeToken(proxySession.getProxyKeyPair(), this.chain.identityClaims().extraData);
+            return new TokenPayload(token, AuthType.SELF_SIGNED);
+        }
+
+        try {
+            return ForgeryUtils.forgeOnlineAuthData(this.account.authManager(), ForgeryUtils.forgeMojangPublicKey());
+        } catch (Exception e) {
+            throw new IllegalStateException("Unable to forge online login", e);
+        }
+    }
+
     @Override
     public void onDisconnect(CharSequence reason) {
         if (this.session.getSendSession() != null && this.session.getSendSession().isConnected()) {
@@ -215,7 +275,7 @@ public class UpstreamPacketHandler implements BedrockPacketHandler {
     }
 
     private void seedDefinitionRegistries(ProxyClientSession downstream) {
-        DefinitionRegistry<ItemDefinition> itemDefinitions = ItemDefinitionRegistries.empty();
+        DefinitionRegistry<ItemDefinition> itemDefinitions = FakeDefinitionRegistry.createItemRegistry();
         downstream.getPeer().getCodecHelper().setBlockDefinitions(this.proxy.getBlockDefinitions());
         downstream.getPeer().getCodecHelper().setItemDefinitions(itemDefinitions);
         this.session.getPeer().getCodecHelper().setBlockDefinitions(this.proxy.getBlockDefinitions());

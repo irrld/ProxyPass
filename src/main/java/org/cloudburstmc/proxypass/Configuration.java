@@ -23,15 +23,19 @@ import java.util.Set;
 @ToString
 public class Configuration {
 
-    @JsonProperty("transport")
-    private Transport transport = Transport.NETHERNET;
     @JsonProperty("proxy")
     private Address proxy;
     @JsonProperty("destination")
-    private Address destination;
+    private Destination destination;
     @JsonProperty("nethernet")
     private NetherNet nethernet = new NetherNet();
 
+    @JsonProperty("online-mode")
+    private boolean onlineMode = true;
+    @JsonProperty("save-auth-details")
+    private boolean saveAuthDetails = true;
+    @JsonProperty("broadcast-session")
+    private boolean broadcastSession = false;
     @JsonProperty("packet-testing")
     private boolean packetTesting = false;
     @JsonProperty("log-packets")
@@ -40,9 +44,22 @@ public class Configuration {
     private int maxClients = 0;
     @JsonProperty("log-to")
     private LogTo logTo = LogTo.FILE;
+    @JsonProperty("enable-ui")
+    private boolean enableUi = false;
+    @JsonProperty("follow-transfers")
+    private boolean followTransfers = true;
+    @JsonProperty("download-packs")
+    private boolean downloadPacks = true;
 
+    @JsonProperty("invert-ignored-list")
+    private boolean invertIgnoredList = false;
     @JsonProperty("ignored-packets")
     private Set<String> ignoredPackets = Collections.emptySet();
+    @JsonProperty("ignore-resource-packs")
+    private boolean ignoreResourcePacks = false;
+
+    @JsonProperty("blocks-packets")
+    private Set<String> blocksPackets = Collections.emptySet();
 
     public static Configuration load(Path path) throws IOException {
         try (BufferedReader reader = Files.newBufferedReader(path)) {
@@ -71,6 +88,8 @@ public class Configuration {
         private String host;
         @JsonProperty("port")
         private int port;
+        @JsonProperty("transport")
+        private Transport transport = Transport.NETHERNET;
         @JsonProperty("signaling-scheme")
         private String signalingScheme = "auto";
         @JsonProperty("server-public-key")
@@ -87,6 +106,26 @@ public class Configuration {
     }
 
     @Getter
+    @ToString(callSuper = true)
+    public static class Destination extends Address {
+        @JsonProperty("experience-id")
+        private String experienceId;
+        @JsonProperty("featured-server-title")
+        private String featuredServerTitle;
+        @JsonProperty("realm-name")
+        private String realmName;
+        @JsonProperty("friend-name")
+        private String friendName;
+        @JsonProperty("nethernet-id")
+        private String nethernetId;
+
+        // Xbox Live targets resolve their own address
+        public boolean hasXboxTarget() {
+            return experienceId != null || featuredServerTitle != null || realmName != null || friendName != null || nethernetId != null;
+        }
+    }
+
+    @Getter
     public static class NetherNet {
         @JsonProperty("identity-file")
         private String identityFile = "nethernet/identity.pem";
@@ -99,14 +138,14 @@ public class Configuration {
     }
 
     private void validate() throws IOException {
-        if (this.transport == null || this.destination == null || this.nethernet == null || this.maxClients < 0) {
+        if (this.destination == null || this.nethernet == null || this.maxClients < 0) {
             throw new IOException("Invalid proxy configuration");
         }
 
-        validateAddress(this.proxy);
-        validateAddress(this.destination);
+        validateAddress(this.proxy, true);
+        validateAddress(this.destination, !this.destination.hasXboxTarget());
         InetSocketAddress listener = this.proxy.getAddress();
-        if (this.transport == Transport.NETHERNET && listener.getAddress() != null && listener.getAddress().isLoopbackAddress()) {
+        if (this.proxy.transport == Transport.NETHERNET && listener.getAddress() != null && listener.getAddress().isLoopbackAddress()) {
             throw new IOException("NetherNet cannot accept retail clients on a loopback address. Set proxy.host to a local network address or 0.0.0.0");
         }
 
@@ -115,8 +154,12 @@ public class Configuration {
         }
     }
 
-    private static void validateAddress(Address address) throws IOException {
-        if (address == null || address.host == null || address.host.isBlank() || address.port < 1 || address.port > 65535) {
+    private static void validateAddress(Address address, boolean requireHost) throws IOException {
+        if (address == null || address.transport == null) {
+            throw new IOException("Every endpoint requires a transport");
+        }
+
+        if (requireHost && (address.host == null || address.host.isBlank() || address.port < 1 || address.port > 65535)) {
             throw new IOException("Every endpoint requires a host and a valid port");
         }
 

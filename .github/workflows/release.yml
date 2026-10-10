@@ -1,0 +1,64 @@
+name: Build
+
+on:
+  push:
+    branches:
+      - '**'
+    paths-ignore:
+      - '.github/ISSUE_TEMPLATE/*.yml'
+      - '.gitignore'
+      - 'CONTRIBUTING.md'
+      - 'LICENSE'
+      - 'README.md'
+      - '.devcontainer/**'
+      - '.vscode/**'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.releaseID }}
+    steps:
+      - name: Set up JDK 25
+        # See https://github.com/actions/setup-java/releases/latest
+        uses: actions/setup-java@dded0888837ed1f317902acf8a20df0ad188d165
+        with:
+          java-version: 25
+          distribution: temurin
+      - name: Checkout repository and submodules
+        # See https://github.com/actions/checkout/releases/latest
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8
+        with:
+          submodules: recursive
+      - name: Setup Gradle
+        # See https://github.com/gradle/actions/releases/latest
+        uses: gradle/actions/setup-gradle@4d9f0ba0025fe599b4ebab900eb7f3a1d93ef4c2
+      - name: Build ProxyPass
+        run: ./gradlew build
+      - name: Archive artifact
+        # See https://github.com/actions/upload-artifact/releases/latest
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4
+        if: success()
+        with:
+          name: ProxyPass
+          path: build/libs/ProxyPass.jar
+          if-no-files-found: error
+      - name: Make release
+        id: release
+        uses: Kas-tle/base-release-action@b863fa0f89bd15267a96a72efb84aec25f168d4c
+        with:
+          files: |
+            build/libs/ProxyPass.jar
+          appID: ${{ secrets.RELEASE_APP_ID }}
+          appPrivateKey: ${{ secrets.RELEASE_APP_PK }}
+          discordWebhook: ${{ secrets.DISCORD_WEBHOOK }}
+
+  upload-logs:
+    name: Upload Logs
+    runs-on: ubuntu-latest
+    needs: release
+    steps:
+    - uses: Kas-tle/release-build-log-action@46873b93db54b63e3d412ff7be96261c3593674c
+      with:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        releaseID: ${{ needs.release.outputs.release_id }}

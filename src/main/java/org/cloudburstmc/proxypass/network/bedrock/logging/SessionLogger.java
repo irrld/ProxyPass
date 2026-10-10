@@ -1,9 +1,14 @@
 package org.cloudburstmc.proxypass.network.bedrock.logging;
 
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
 import lombok.extern.log4j.Log4j2;
 import org.cloudburstmc.protocol.bedrock.BedrockSession;
+import org.cloudburstmc.protocol.bedrock.codec.BedrockCodecHelper;
+import org.cloudburstmc.protocol.bedrock.netty.BedrockPacketWrapper;
 import org.cloudburstmc.protocol.bedrock.packet.BedrockPacket;
 import org.cloudburstmc.proxypass.ProxyPass;
+import org.cloudburstmc.proxypass.ui.PacketInspector;
 import org.jose4j.json.internal.json_simple.JSONObject;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectWriter;
@@ -44,9 +49,9 @@ public class SessionLogger implements AutoCloseable {
 
     private ScheduledFuture<?> flushTask;
 
-    public SessionLogger(ProxyPass proxy, Path sessionsDir, String displayName, long timestamp) {
+    public SessionLogger(ProxyPass proxy, Path dataPath) {
         this.proxy = proxy;
-        this.dataPath = sessionsDir.resolve(displayName + '-' + timestamp);
+        this.dataPath = dataPath;
         this.logPath = dataPath.resolve("packets.log");
     }
 
@@ -97,21 +102,64 @@ public class SessionLogger implements AutoCloseable {
     }
 
     public void logPacket(BedrockSession session, BedrockPacket packet, boolean upstream) {
-        String logPrefix = getLogPrefix(upstream);
-        if (!proxy.isIgnoredPacket(packet.getClass())) {
-            if (session.isLogging() && log.isTraceEnabled()) {
-                log.trace("{} {}: {}", logPrefix, session.getSocketAddress(), packet);
-            }
-
-            String logMessage = String.format(LOG_FORMAT, FORMATTER.format(Instant.now()), logPrefix, packet);
-            if (proxy.getConfiguration().isLoggingPackets()) {
-                logToBuffer(() -> logMessage);
-            }
-
-            if (proxy.getConfiguration().isLoggingPackets() && proxy.getConfiguration().getLogTo().logToConsole) {
-                System.out.println(logMessage);
+        if (logText(session, packet, upstream) && proxy.isUiEnabled()) {
+            ByteBuf buffer = ByteBufAllocator.DEFAULT.ioBuffer();
+            try {
+                BedrockCodecHelper helper = session.getPeer().getCodecHelper();
+                ProxyPass.CODEC.tryEncode(helper, buffer, packet);
+                byte[] data = new byte[buffer.readableBytes()];
+                buffer.getBytes(buffer.readerIndex(), data);
+                PacketInspector.addPacket(packet, data, !upstream, session.getSocketAddress().toString());
+            } catch (Exception e) {
+                log.debug("Failed to capture packet for UI", e);
+            } finally {
+                buffer.release();
             }
         }
+    }
+
+    public void logPacket(BedrockSession session, BedrockPacketWrapper wrapper, boolean upstream) {
+        BedrockPacket packet = wrapper.getPacket();
+        logText(session, packet, upstream);
+
+        if (proxy.isUiEnabled()) {
+            ByteBuf packetBuffer = wrapper.getPacketBuffer().slice();
+            packetBuffer.skipBytes(wrapper.getHeaderLength()); // skip header
+            ByteBuf buffer = packetBuffer.alloc().ioBuffer();
+            try {
+                buffer.writeInt(wrapper.getPacketId()); // packet ID
+                buffer.writeBytes(packetBuffer);
+                byte[] data = new byte[buffer.readableBytes()];
+                buffer.getBytes(buffer.readerIndex(), data);
+                PacketInspector.addPacket(packet, data, !upstream, session.getSocketAddress().toString());
+            } catch (Exception e) {
+                log.debug("Failed to capture packet for UI", e);
+            } finally {
+                buffer.release();
+            }
+        }
+    }
+
+    // Returns false when the packet is ignored
+    private boolean logText(BedrockSession session, BedrockPacket packet, boolean upstream) {
+        if (proxy.isIgnoredPacket(packet.getClass())) {
+            return false;
+        }
+
+        String logPrefix = getLogPrefix(upstream);
+        if (session.isLogging() && log.isTraceEnabled()) {
+            log.trace("{} {}: {}", logPrefix, session.getSocketAddress(), packet);
+        }
+
+        String logMessage = String.format(LOG_FORMAT, FORMATTER.format(Instant.now()), logPrefix, packet);
+        if (proxy.getConfiguration().isLoggingPackets()) {
+            logToBuffer(() -> logMessage);
+        }
+
+        if (proxy.getConfiguration().isLoggingPackets() && proxy.getConfiguration().getLogTo().logToConsole) {
+            System.out.println(logMessage);
+        }
+        return true;
     }
 
     private String getLogPrefix(boolean upstream) {

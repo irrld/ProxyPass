@@ -230,3 +230,6 @@ packet-logs/
 packet-logs/*
 data/
 sessions/
+
+# Saved Microsoft account credentials
+auth.json

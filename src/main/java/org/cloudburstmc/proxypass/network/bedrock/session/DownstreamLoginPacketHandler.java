@@ -53,6 +53,7 @@ public class DownstreamLoginPacketHandler implements BedrockPacketHandler {
         this.packetHandler = new DownstreamPacketHandler(this.session, this.player, this.proxy);
         log.info("Backend selected {} compression for {}", packet.getCompressionAlgorithm(), this.session.getSocketAddress());
         this.session.sendPacketImmediately(this.loginPacket);
+        this.player.getLogger().logPacket(this.session, this.loginPacket, true);
         return PacketSignal.HANDLED;
     }
 
@@ -72,13 +73,15 @@ public class DownstreamLoginPacketHandler implements BedrockPacketHandler {
             }
 
             byte[] salt = Base64.getDecoder().decode(JsonUtils.childAsType(JsonUtil.parseJson(signature.getPayload()), "salt", String.class));
-            if (this.proxy.getConfiguration().getTransport().supportsPacketEncryption()) {
+            if (this.proxy.getServerAddress().getTransport().supportsPacketEncryption()) {
                 SecretKey key = EncryptionUtils.getSecretKey(this.player.getProxyKeyPair().getPrivate(), serverKey, salt);
                 this.session.enableEncryption(key);
             }
 
             this.handshakeReceived = true;
-            this.session.sendPacketImmediately(new ClientToServerHandshakePacket());
+            ClientToServerHandshakePacket handshake = new ClientToServerHandshakePacket();
+            this.session.sendPacketImmediately(handshake);
+            this.player.getLogger().logPacket(this.session, handshake, true);
             log.debug("Backend login handshake acknowledged for {}", this.session.getSocketAddress());
         } catch (JoseException | GeneralSecurityException failure) {
             throw new IllegalStateException("Unable to acknowledge backend login handshake", failure);

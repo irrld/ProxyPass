@@ -3,15 +3,22 @@ import com.github.jengelman.gradle.plugins.shadow.transformers.Log4j2PluginsCach
 description = "Proxy pass allows developers to MITM a vanilla client and server without modifying them."
 
 plugins {
+    id("eclipse")
     id("java")
     id("application")
     alias(libs.plugins.shadow)
+    alias(libs.plugins.javafxplugin)
 }
 
 java {
     toolchain {
-        languageVersion.set(JavaLanguageVersion.of(17))
+        languageVersion.set(JavaLanguageVersion.of(25))
     }
+}
+
+javafx {
+    version = "25.0.1"
+    modules("javafx.controls", "javafx.fxml")
 }
 
 repositories {
@@ -19,6 +26,7 @@ repositories {
     mavenCentral()
     maven("https://repo.opencollab.dev/maven-snapshots")
     maven("https://repo.opencollab.dev/maven-releases")
+    maven("https://jitpack.io")
 }
 
 dependencies {
@@ -42,6 +50,9 @@ dependencies {
     runtimeOnly(libs.log4j.slf4j2.impl)
     implementation(libs.jansi)
     implementation(libs.jline.reader)
+    implementation(libs.minecraftauth)
+    implementation(libs.richtextfx)
+    implementation(libs.atlantafx)
 
     testImplementation(libs.junit.jupiter.api)
     testRuntimeOnly(libs.junit.jupiter.engine)

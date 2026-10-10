@@ -1,0 +1,25 @@
+{
+	"name": "Java",
+	"image": "mcr.microsoft.com/devcontainers/java:25",
+	"features": {
+		"ghcr.io/devcontainers/features/java:1": {
+			"version": "25",
+			"additionalVersions": "8",
+			"installMaven": "false",
+			"installGradle": "true"
+		}
+	},
+    "postCreateCommand": "git submodule update --init --recursive",
+    "customizations": {
+        "codespaces": {
+            "repositories": {
+                "Kas-tle/NetworkCompatible": {
+                    "permissions": "write-all"
+                },
+                "Kas-tle/Protocol": {
+                    "permissions": "write-all"
+                }
+            }
+        }
+    }
+}

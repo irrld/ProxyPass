@@ -12,25 +12,30 @@ import org.cloudburstmc.nbt.util.stream.LittleEndianDataOutputStream;
 import org.cloudburstmc.protocol.bedrock.BedrockSession;
 import org.cloudburstmc.protocol.bedrock.data.BlockPropertyData;
 import org.cloudburstmc.protocol.bedrock.data.biome.BiomeDefinitionData;
+import org.cloudburstmc.protocol.bedrock.data.camera.CameraPreset;
 import org.cloudburstmc.protocol.bedrock.data.definitions.BlockDefinition;
 import org.cloudburstmc.protocol.bedrock.data.definitions.ItemDefinition;
-import org.cloudburstmc.protocol.bedrock.data.definitions.SimpleItemDefinition;
 import org.cloudburstmc.protocol.bedrock.data.inventory.CreativeItemData;
 import org.cloudburstmc.protocol.bedrock.data.inventory.CreativeItemGroup;
 import org.cloudburstmc.protocol.bedrock.data.inventory.ItemData;
 import org.cloudburstmc.protocol.bedrock.packet.*;
 import org.cloudburstmc.protocol.common.DefinitionRegistry;
+import org.cloudburstmc.protocol.common.NamedDefinition;
 import org.cloudburstmc.protocol.common.PacketSignal;
 import org.cloudburstmc.protocol.common.SimpleDefinitionRegistry;
 import org.cloudburstmc.proxypass.ProxyPass;
-import org.cloudburstmc.proxypass.network.bedrock.util.ItemDefinitionRegistries;
+import org.cloudburstmc.proxypass.network.bedrock.util.FakeDefinitionRegistry;
 import org.cloudburstmc.proxypass.network.bedrock.util.NbtBlockDefinitionRegistry;
 import org.cloudburstmc.proxypass.network.bedrock.util.RecipeUtils;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.URISyntaxException;
 import java.util.*;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 @Log4j2
 @RequiredArgsConstructor
@@ -109,13 +114,7 @@ public class DownstreamPacketHandler implements BedrockPacketHandler {
                 ProxyPass.legacyIdMap.put(entry.getRuntimeId(), entry.getIdentifier());
             }
 
-            SimpleDefinitionRegistry<ItemDefinition> itemDefinitions = SimpleDefinitionRegistry.<ItemDefinition>builder()
-                    .addAll(packet.getItemDefinitions())
-                    .add(new SimpleItemDefinition("minecraft:empty", 0, false))
-                    .build();
-
-            this.session.getPeer().getCodecHelper().setItemDefinitions(itemDefinitions);
-            player.getUpstream().getPeer().getCodecHelper().setItemDefinitions(itemDefinitions);
+            setItemDefinitions(packet.getItemDefinitions());
 
             itemData.sort(Comparator.comparing(o -> o.name));
 
@@ -183,10 +182,7 @@ public class DownstreamPacketHandler implements BedrockPacketHandler {
                 ProxyPass.legacyIdMap.put(entry.id(), entry.name());
             }
 
-            DefinitionRegistry<ItemDefinition> itemDefinitions = ItemDefinitionRegistries.fromDefinitions(packet.getItems());
-
-            this.session.getPeer().getCodecHelper().setItemDefinitions(itemDefinitions);
-            player.getUpstream().getPeer().getCodecHelper().setItemDefinitions(itemDefinitions);
+            setItemDefinitions(packet.getItems());
 
             itemData.sort(Comparator.comparing(o -> o.name));
             proxy.saveJson("runtime_item_states.json", itemData);
@@ -195,6 +191,14 @@ public class DownstreamPacketHandler implements BedrockPacketHandler {
         proxy.saveCompressedNBT("item_components", root.build());
 
         return PacketSignal.UNHANDLED;
+    }
+
+    private void setItemDefinitions(Collection<? extends ItemDefinition> definitions) {
+        FakeDefinitionRegistry<ItemDefinition> registry = FakeDefinitionRegistry.createItemRegistry();
+        definitions.forEach(registry::register);
+
+        this.session.getPeer().getCodecHelper().setItemDefinitions(registry);
+        player.getUpstream().getPeer().getCodecHelper().setItemDefinitions(registry);
     }
 
     @Override
@@ -207,6 +211,71 @@ public class DownstreamPacketHandler implements BedrockPacketHandler {
     public PacketSignal handle(DisconnectPacket packet) {
         this.session.disconnect();
         // Let the client see the reason too.
+        return PacketSignal.UNHANDLED;
+    }
+
+    @Override
+    public PacketSignal handle(CameraPresetsPacket packet) {
+        DefinitionRegistry<NamedDefinition> cameraDefinitions = SimpleDefinitionRegistry.<NamedDefinition>builder()
+                .addAll(IntStream.range(0, packet.getPresets().size())
+                        .mapToObj(i -> CameraPresetDefinition.fromCameraPreset(packet.getPresets().get(i), i))
+                        .collect(Collectors.toList()))
+                .build();
+
+        this.session.getPeer().getCodecHelper().setCameraPresetDefinitions(cameraDefinitions);
+        player.getUpstream().getPeer().getCodecHelper().setCameraPresetDefinitions(cameraDefinitions);
+        return PacketSignal.UNHANDLED;
+    }
+
+    @Override
+    public PacketSignal handle(TransferPacket packet) {
+        if (!this.proxy.getConfiguration().isFollowTransfers()) {
+            return PacketSignal.UNHANDLED;
+        }
+
+        InetSocketAddress address = new InetSocketAddress(packet.getAddress(), packet.getPort());
+        this.proxy.setTargetAddress(address);
+
+        log.info("Transfer to {}:{}", packet.getAddress(), packet.getPort());
+
+        // Simulate transfer by sending the player back to us
+        TransferPacket transferPacket = new TransferPacket();
+        URI uri;
+        try {
+            uri = new URI(null, player.getUpstream().getConnectedViaAddress(), null, null).parseServerAuthority();
+            transferPacket.setAddress(uri.getHost());
+            transferPacket.setPort(uri.getPort());
+        } catch (URISyntaxException e) {
+            InetSocketAddress proxyAddress = proxy.getConfiguration().getProxy().getAddress();
+            transferPacket.setAddress(proxyAddress.getHostString());
+            transferPacket.setPort(proxyAddress.getPort());
+        }
+
+        transferPacket.setReloadWorld(packet.isReloadWorld());
+        this.player.getUpstream().sendPacketImmediately(transferPacket);
+
+        this.session.disconnect();
+
+        return PacketSignal.HANDLED;
+    }
+
+    @Override
+    public PacketSignal handle(ResourcePacksInfoPacket packet) {
+        if (!this.proxy.getConfiguration().isDownloadPacks()) {
+            return PacketSignal.UNHANDLED;
+        }
+        for (ResourcePacksInfoPacket.Entry entry : packet.getResourcePackInfos()) {
+            player.getPackDownloader().registerPack(entry.getPackId(), entry.getCdnUrl(), entry.getContentKey());
+        }
+        return PacketSignal.UNHANDLED;
+    }
+
+    @Override
+    public PacketSignal handle(ResourcePackChunkDataPacket packet) {
+        if (!this.proxy.getConfiguration().isDownloadPacks()) {
+            return PacketSignal.UNHANDLED;
+        }
+        player.getPackDownloader().addChunk(packet.getPackId(), packet.getChunkIndex(), packet.getData().retain());
         return PacketSignal.UNHANDLED;
     }
 
@@ -331,5 +400,21 @@ public class DownstreamPacketHandler implements BedrockPacketHandler {
 
     @JsonPropertyOrder({"name", "id", "version", "componentBased"})
     private record DataEntry(String name, int id, int version, boolean componentBased) {
+    }
+
+    private record CameraPresetDefinition(String identifier, int runtimeId) implements NamedDefinition {
+        static CameraPresetDefinition fromCameraPreset(CameraPreset preset, int index) {
+            return new CameraPresetDefinition(preset.getIdentifier(), index);
+        }
+
+        @Override
+        public String getIdentifier() {
+            return identifier;
+        }
+
+        @Override
+        public int getRuntimeId() {
+            return runtimeId;
+        }
     }
 }
